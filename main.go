@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+
+	"encoding/base64"
 
 	"github.com/gorilla/websocket"
 )
@@ -34,19 +38,23 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleWebsocket(conn *websocket.Conn, name string) error {
+	fmt.Printf("handling connection to %s\n", name)
+
 	socket, err := net.Dial("tcp", name)
 	if err != nil {
 		return err
 	}
 
 	go func() {
-		buf := make([]byte, 1024)
+		buf := make([]byte, 10024)
 		for {
 			n, err := socket.Read(buf)
 			if err != nil {
 				fmt.Printf("failed to read from socket: %v\n", err)
 				return
 			}
+
+			fmt.Printf("Got %d bytes pg->client: %s\n", n, base64.StdEncoding.EncodeToString(buf[:n]))
 
 			err = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
 			if err != nil {
@@ -62,7 +70,9 @@ func handleWebsocket(conn *websocket.Conn, name string) error {
 			return err
 		}
 
-		_, err = socket.Write(b)
+		fmt.Printf("Got %d bytes client->pg: %s\n", len(b), base64.StdEncoding.EncodeToString(b))
+
+		_, err = io.Copy(socket, bytes.NewReader(b))
 		if err != nil {
 			return err
 		}
@@ -72,7 +82,7 @@ func handleWebsocket(conn *websocket.Conn, name string) error {
 func main() {
 	port := os.Getenv("LISTEN_PORT")
 	if port == "" {
-		port = ":8080"
+		port = ":80"
 	}
 
 	http.HandleFunc("/", Handle)
