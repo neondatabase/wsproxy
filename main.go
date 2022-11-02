@@ -55,7 +55,7 @@ func (h *ProxyHandler) ExtractProxyDest(r *http.Request) (string, error) {
 		addr = hostHeader
 	}
 	if h.cfg.AppendPort != "" {
-		addr = addr + h.cfg.AppendPort
+		addr += h.cfg.AppendPort
 	}
 
 	allowed := IsAddrAllowed(addr, h.cfg.AllowedSuffixes)
@@ -79,6 +79,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	addr, err := h.ExtractProxyDest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -158,5 +159,8 @@ func main() {
 
 	http.Handle("/", handler)
 	log.Printf("Starting server on port %s", cfg.ListenPort)
-	http.ListenAndServe(cfg.ListenPort, nil)
+	err = http.ListenAndServe(cfg.ListenPort, nil) //nolint:gosec
+	if err != nil {
+		log.Fatalf("HTTP ListenAndServe finished with error: %v", err)
+	}
 }
