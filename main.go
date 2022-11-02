@@ -76,7 +76,13 @@ func (h *ProxyHandler) ExtractProxyDest(r *http.Request) (string, error) {
 	allowed := IsAddrAllowed(addr, h.addrRegex)
 
 	if h.cfg.LogConnInfo {
-		log.Printf("Got request from %s, proxying to %s, allowed=%v, addressArg=%v, hostHeader=%v", r.RemoteAddr, addr, allowed, addressArg, hostHeader)
+		log.Printf(
+			"Got request from %s, proxying to %s, allowed=%v, addressArg=%v, hostHeader=%v",
+			r.RemoteAddr,
+			addr, allowed,
+			addressArg,
+			hostHeader,
+		)
 	}
 
 	if !allowed {
