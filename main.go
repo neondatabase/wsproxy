@@ -8,15 +8,35 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"time"
 
 	"encoding/base64"
 
 	"github.com/caarlos0/env/v6"
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	connectionsProcessed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "wsproxy_connections_total",
+		Help: "The total number of processed connections",
+	})
+	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "wsproxy_active_connections",
+		Help: "The number of active connections",
+	})
+	proxiedBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "wsproxy_bytes_total",
+		Help: "The total number of proxied bytes",
+	}, []string{"source"})
 )
 
 type Config struct {
 	ListenPort     string `env:"LISTEN_PORT" envDefault:":80"`
+	PrometheusBind string `env:"PROMETHEUS_BIND" envDefault:":2112"`
 	AllowAddrRegex string `env:"ALLOW_ADDR_REGEX" envDefault:"^[a-zA-Z\\-0-9\\.]*\\.neon\\.tech\\:5432$"`
 	AppendPort     string `env:"APPEND_PORT" envDefault:""`
 	UseHostHeader  bool   `env:"USE_HOST_HEADER" envDefault:"false"`
@@ -118,6 +138,10 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
+	connectionsProcessed.Inc()
+	activeConnections.Inc()
+	defer activeConnections.Dec()
+
 	socket, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err
@@ -133,6 +157,8 @@ func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
 				log.Printf("failed to read from socket: %v\n", err)
 				return
 			}
+
+			proxiedBytes.WithLabelValues("tcp").Add(float64(n))
 
 			if h.cfg.LogTraffic {
 				log.Printf("Got %d bytes pg->client: %s\n", n, base64.StdEncoding.EncodeToString(buf[:n]))
@@ -152,6 +178,8 @@ func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
 			return err
 		}
 
+		proxiedBytes.WithLabelValues("ws").Add(float64(len(b)))
+
 		if h.cfg.LogTraffic {
 			log.Printf("Got %d bytes client->pg: %s\n", len(b), base64.StdEncoding.EncodeToString(b))
 		}
@@ -160,6 +188,31 @@ func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
 		if err != nil {
 			return err
 		}
+	}
+}
+
+// SecureListenAndServe is a usual http.ListenAndServe that
+// fixes https://deepsource.io/directory/analyzers/go/issues/GO-S2114
+func SecureListenAndServe(addr string, handler http.Handler) error {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 3 * time.Second,
+	}
+	err := server.ListenAndServe()
+	if err == http.ErrServerClosed {
+		// This is a normal shutdown, we don't want to log it.
+		return nil
+	}
+	return err
+}
+
+func ServeMetrics(prometheusBind string) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	err := SecureListenAndServe(prometheusBind, mux)
+	if err != nil {
+		log.Fatalf("HTTP ListenAndServe for prometheus finished with error: %v", err)
 	}
 }
 
@@ -176,6 +229,8 @@ func main() {
 		log.Printf("Using regex for allowed addresses: %v", cfg.AllowAddrRegex)
 	}
 
+	go ServeMetrics(cfg.PrometheusBind)
+
 	handler, err := NewProxyHandler(&cfg)
 	if err != nil {
 		log.Fatalf("Failed to create proxy handler: %v", err)
@@ -183,7 +238,7 @@ func main() {
 
 	http.Handle("/v1", handler)
 	log.Printf("Starting server on port %s", cfg.ListenPort)
-	err = http.ListenAndServe(cfg.ListenPort, nil) //nolint:gosec
+	err = SecureListenAndServe(cfg.ListenPort, nil)
 	if err != nil {
 		log.Fatalf("HTTP ListenAndServe finished with error: %v", err)
 	}
