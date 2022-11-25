@@ -151,7 +151,12 @@ func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
 	go func() {
 		message := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "TCP connection is closed")
 		// Close the websocket connection when TCP connection loop is finished.
-		defer conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(time.Second)) //nolint:errcheck
+		defer func() {
+			err := conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(time.Second))
+			if err != nil {
+				log.Printf("failed to send close to websocket connection: %v\n", err)
+			}
+		}()
 
 		const bufferSize = 32 * 1024
 		buf := make([]byte, bufferSize)
