@@ -1,0 +1,28 @@
+services:
+    pgsql:
+        image: timescale/timescaledb:latest-pg16
+        restart: always
+        tmpfs:
+            - /var/lib/postgresql/data
+        volumes:
+            - pg_socket:/var/run/postgresql
+        environment:
+            POSTGRES_DB: neon-db
+            POSTGRES_USER: postgres
+            POSTGRES_PASSWORD: neon-password
+    
+    neon:
+        image: ghcr.io/flexchar/wsproxy:latest
+        restart: always
+        depends_on:
+            - pgsql
+        environment:
+            LOG_CONN_INFO: true
+            UNIX_SOCKET_PATH: "/var/run/postgresql/.s.PGSQL.5432"
+        volumes:
+            - pg_socket:/var/run/postgresql
+        ports:
+          - 80
+
+volumes:
+    pg_socket:
