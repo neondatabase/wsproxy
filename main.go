@@ -42,6 +42,7 @@ type Config struct {
 	UseHostHeader  bool   `env:"USE_HOST_HEADER" envDefault:"false"`
 	LogTraffic     bool   `env:"LOG_TRAFFIC" envDefault:"false"`
 	LogConnInfo    bool   `env:"LOG_CONN_INFO" envDefault:"true"`
+	UnixSocketPath string `env:"UNIX_SOCKET_PATH" envDefault:""`
 }
 
 var upgrader = websocket.Upgrader{
@@ -81,7 +82,11 @@ func NewProxyHandler(config *Config) (*ProxyHandler, error) {
 	}, nil
 }
 
-func (h *ProxyHandler) ExtractProxyDest(r *http.Request) (string, error) {
+func (h *ProxyHandler) ExtractProxyDest(r *http.Request) (string, string, error) {
+	if h.cfg.UnixSocketPath != "" {
+		return "unix", h.cfg.UnixSocketPath, nil
+	}
+
 	addressArg := r.URL.Query().Get("address")
 	hostHeader := r.Host
 
@@ -106,10 +111,10 @@ func (h *ProxyHandler) ExtractProxyDest(r *http.Request) (string, error) {
 	}
 
 	if !allowed {
-		return "", fmt.Errorf("proxying to specified address not allowed")
+		return "", "", fmt.Errorf("proxying to specified address not allowed")
 	}
 
-	return addr, nil
+	return "tcp", addr, nil
 }
 
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +122,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Got request from %s", r.RemoteAddr)
 	}
 
-	addr, err := h.ExtractProxyDest(r)
+	network, addr, err := h.ExtractProxyDest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -130,27 +135,26 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	err = h.HandleWS(conn, addr)
+	err = h.HandleWS(conn, network, addr)
 	if err != nil {
 		log.Printf("failed to handle websocket: %v\n", err)
 		return
 	}
 }
 
-func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
+func (h *ProxyHandler) HandleWS(conn *websocket.Conn, network, addr string) error {
 	connectionsProcessed.Inc()
 	activeConnections.Inc()
 	defer activeConnections.Dec()
 
-	socket, err := net.Dial("tcp", addr)
+	socket, err := net.Dial(network, addr)
 	if err != nil {
 		return err
 	}
 	defer socket.Close()
 
 	go func() {
-		message := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "TCP connection is closed")
-		// Close the websocket connection when TCP connection loop is finished.
+		message := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Connection is closed")
 		defer func() {
 			err := conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(time.Second))
 			if err != nil {
@@ -163,11 +167,13 @@ func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
 		for {
 			n, err := socket.Read(buf)
 			if err != nil {
-				log.Printf("failed to read from socket: %v\n", err)
+				if err != io.EOF {
+					log.Printf("failed to read from socket: %v\n", err)
+				}
 				return
 			}
 
-			proxiedBytes.WithLabelValues("tcp").Add(float64(n))
+			proxiedBytes.WithLabelValues(network).Add(float64(n))
 
 			if h.cfg.LogTraffic {
 				log.Printf("Got %d bytes pg->client: %s\n", n, base64.StdEncoding.EncodeToString(buf[:n]))
@@ -184,7 +190,10 @@ func (h *ProxyHandler) HandleWS(conn *websocket.Conn, addr string) error {
 	for {
 		_, b, err := conn.ReadMessage()
 		if err != nil {
-			return err
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("websocket error: %v", err)
+			}
+			return nil
 		}
 
 		proxiedBytes.WithLabelValues("ws").Add(float64(len(b)))
@@ -232,7 +241,9 @@ func main() {
 		log.Fatalf("Failed to parse config: %v", err)
 	}
 
-	if cfg.AllowAddrRegex == "" {
+	if cfg.UnixSocketPath != "" {
+		log.Printf("Using Unix socket path: %s", cfg.UnixSocketPath)
+	} else if cfg.AllowAddrRegex == "" {
 		log.Printf("WARN: No regex for allowed addresses, allowing all")
 	} else {
 		log.Printf("Using regex for allowed addresses: %v", cfg.AllowAddrRegex)
